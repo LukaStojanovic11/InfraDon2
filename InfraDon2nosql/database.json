@@ -1,0 +1,17 @@
+{
+  "_id": "155f99cfeafe45fb44bbc6e3e6000ad4",
+  "_rev": "1-e9f762068820c6cae92254b1c06b88e6",
+  "titre": "Inception",
+  "annee": 2010,
+  "realisateur": "Christopher Nolan",
+  "acteurs": [
+    "Leonardo DiCaprio",
+    "Joseph Gordon-Levitt",
+    "Elliot Page"
+  ],
+  "details": {
+    "duree": 148,
+    "genre": "Science-fiction",
+    "note": 8.8
+  }
+}
