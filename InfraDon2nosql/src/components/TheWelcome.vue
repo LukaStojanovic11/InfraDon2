@@ -5,7 +5,13 @@ import PouchDB from 'pouchdb-browser'
 import PouchDBFind from 'pouchdb-find'
 ;(PouchDB as any).plugin(PouchDBFind)
 
-type InfraComment = { text: string; created_at: string }
+//types
+
+type InfraComment = {
+  text: string
+  created_at: string
+}
+
 type InfraDoc = {
   _id?: string
   _rev?: string
@@ -14,106 +20,187 @@ type InfraDoc = {
   created_at: string
   updated_at?: string
   likes?: number
-  comments?: InfraComment[]
+  comments: InfraComment[]
+  categoryId?: string | null
 }
 
-const COUCH_URL = 'http://admin:111911@127.0.0.1:5984/database'
+type Category = {
+  _id?: string
+  _rev?: string
+  name: string
+  created_at: string
+}
+
+
+
+const DOCS_URL = 'http://admin:111911@127.0.0.1:5984/database'
+const CATS_URL = 'http://admin:111911@127.0.0.1:5984/categories_db'
 
 export default defineComponent({
-  name: 'InfraCrud',
+  name: 'TheWelcome',
+
   data() {
     return {
+      // documents
       localDb: null as any,
       remoteDb: null as any,
-      syncHandler: null as any,
-      loading: false,
-      error: '',
-      online: true,
       docs: [] as InfraDoc[],
-      form: { _id: '', _rev: '', name: '', content: '' },
+      form: {
+        _id: '',
+        _rev: '',
+        name: '',
+        content: ''
+      },
       isEdit: false,
       searchTerm: '',
       sortByLikes: false,
-      commentDrafts: {} as Record<string, string>
+      commentDrafts: {} as Record<string, string>,
+
+      // catégories (2e collection)
+      localCatDb: null as any,
+      remoteCatDb: null as any,
+      categories: [] as Category[],
+      categoryName: '',
+      selectedCategory: '',
+
+      // sync / état global
+      syncHandler: null as any,
+      catSyncHandler: null as any,
+      online: true,
+      loading: false,
+      error: ''
     }
   },
 
   methods: {
+
+
     initLocalDb() {
-      if (!this.localDb) this.localDb = new (PouchDB as any)('infra_local')
+      if (!this.localDb) {
+        this.localDb = new PouchDB('infra_local')
+      }
       return this.localDb
     },
+
     initRemoteDb() {
-      if (!this.remoteDb) this.remoteDb = new (PouchDB as any)(COUCH_URL)
+      if (!this.remoteDb) {
+        this.remoteDb = new PouchDB(DOCS_URL)
+      }
       return this.remoteDb
     },
+
+    initLocalCatDb() {
+      if (!this.localCatDb) {
+        this.localCatDb = new PouchDB('categories_local')
+      }
+      return this.localCatDb
+    },
+
+    initRemoteCatDb() {
+      if (!this.remoteCatDb) {
+        this.remoteCatDb = new PouchDB(CATS_URL)
+      }
+      return this.remoteCatDb
+    },
+
+
+
     normalizeDoc(raw: any): InfraDoc {
       return {
         ...raw,
         likes: typeof raw.likes === 'number' ? raw.likes : 0,
-        comments: Array.isArray(raw.comments) ? raw.comments : []
+        comments: Array.isArray(raw.comments) ? raw.comments : [],
+        categoryId: raw.categoryId ?? null
       }
     },
+
+
+
+    async ensureIndex() {
+      const db = this.initLocalDb()
+      await db.createIndex({ index: { fields: ['name'] } })
+      await db.createIndex({ index: { fields: ['likes'] } })
+    },
+
+    async ensureCatIndex() {
+      const db = this.initLocalCatDb()
+      await db.createIndex({ index: { fields: ['name'] } })
+    },
+
+    //crud doc
 
     async fetchData() {
       this.loading = true
       this.error = ''
       try {
         const db = this.initLocalDb()
+        let docs: InfraDoc[] = []
+
         if (this.sortByLikes) {
           const r = await db.find({
             selector: { likes: { $gte: 0 } },
             sort: [{ likes: 'desc' }]
           })
-          this.docs = (r.docs as any[]).map(this.normalizeDoc)
+          docs = (r.docs as any[]).map((d) => this.normalizeDoc(d))
         } else {
           const r = await db.allDocs({ include_docs: true })
-          this.docs = r.rows
-            .map((row: any) => row.doc)
-            .filter(Boolean)
-            .map(this.normalizeDoc)
+          docs = (r.rows as Array<{ doc: any }>)
+            .map((row) => row.doc)
+            .filter((d): d is any => !!d)
+            .map((d) => this.normalizeDoc(d))
             .sort(
               (a: InfraDoc, b: InfraDoc) =>
                 new Date(b.created_at).getTime() -
                 new Date(a.created_at).getTime()
             )
         }
+
+        // filtre par catégorie si une catégorie est sélectionnée
+        if (this.selectedCategory) {
+          docs = docs.filter((d) => d.categoryId === this.selectedCategory)
+        }
+
+        this.docs = docs
       } catch (e: any) {
-        this.error = 'Erreur fetchData: ' + e.message
+        this.error = 'Erreur fetch docs : ' + e.message
       } finally {
         this.loading = false
       }
     },
 
-    async ensureIndex() {
-      const db = this.initLocalDb()
-      try {
-        await db.createIndex({ index: { fields: ['name'] } })
-        await db.createIndex({ index: { fields: ['likes'] } })
-      } catch {}
-    },
-
     resetForm() {
       this.isEdit = false
-      this.form = { _id: '', _rev: '', name: '', content: '' }
+      this.form = {
+        _id: '',
+        _rev: '',
+        name: '',
+        content: ''
+      }
+      this.selectedCategory = ''
     },
 
     async submitForm() {
-      if (!this.form.name || !this.form.content) return
+      if (!this.form.name.trim() || !this.form.content.trim()) return
+
       this.loading = true
+      this.error = ''
       try {
         const db = this.initLocalDb()
+
         if (this.isEdit && this.form._id) {
-          const current = await db.get(this.form._id)
-          const base = this.normalizeDoc(current)
+          const fresh = await db.get(this.form._id)
+          const base = this.normalizeDoc(fresh)
+
           const updated: InfraDoc = {
             ...base,
             _id: this.form._id,
             _rev: this.form._rev,
             name: this.form.name,
             content: this.form.content,
-            updated_at: new Date().toISOString()
+            updated_at: new Date().toISOString(),
+            categoryId: this.selectedCategory || null
           }
+
           await db.put(updated)
         } else {
           const doc: InfraDoc = {
@@ -121,15 +208,17 @@ export default defineComponent({
             content: this.form.content,
             created_at: new Date().toISOString(),
             likes: 0,
-            comments: []
+            comments: [],
+            categoryId: this.selectedCategory || null
           }
           await db.post(doc)
         }
+
         this.resetForm()
         await this.fetchData()
         if (this.online) await this.manualSync()
       } catch (e: any) {
-        this.error = 'Erreur submit: ' + e.message
+        this.error = 'Erreur submit doc : ' + e.message
       } finally {
         this.loading = false
       }
@@ -137,23 +226,27 @@ export default defineComponent({
 
     startEdit(doc: InfraDoc) {
       this.isEdit = true
-      this.form._id = doc._id || ''
-      this.form._rev = doc._rev || ''
-      this.form.name = doc.name
-      this.form.content = doc.content
+      this.form = {
+        _id: doc._id || '',
+        _rev: doc._rev || '',
+        name: doc.name,
+        content: doc.content
+      }
+      this.selectedCategory = doc.categoryId || ''
     },
 
     async deleteData(id: string, rev: string) {
       if (!id || !rev) return
+
       this.loading = true
+      this.error = ''
       try {
         const db = this.initLocalDb()
         await db.remove(id, rev)
-        if (this.form._id === id) this.resetForm()
         await this.fetchData()
         if (this.online) await this.manualSync()
       } catch (e: any) {
-        this.error = 'Erreur delete: ' + e.message
+        this.error = 'Erreur delete doc : ' + e.message
       } finally {
         this.loading = false
       }
@@ -161,15 +254,75 @@ export default defineComponent({
 
     async likeDoc(doc: InfraDoc) {
       if (!doc._id) return
+
+      this.error = ''
       try {
         const db = this.initLocalDb()
         const fresh = await db.get(doc._id)
         const base = this.normalizeDoc(fresh)
         await db.put({ ...base, likes: (base.likes || 0) + 1 })
+
         await this.fetchData()
         if (this.online) await this.manualSync()
       } catch (e: any) {
-        this.error = 'Erreur like: ' + e.message
+        this.error = 'Erreur like : ' + e.message
+      }
+    },
+
+    async generateFake(n = 20) {
+  const db = this.initLocalDb()
+  const now = Date.now()
+  const docs: any[] = []
+
+  for (let i = 0; i < n; i++) {
+    let randomCatId: string | null = null
+
+    if (this.categories.length > 0) {
+      const index = Math.floor(Math.random() * this.categories.length)
+      const randomCat: Category | undefined = this.categories[index]
+      randomCatId = randomCat?._id ?? null
+    }
+
+    docs.push({
+      _id: 'fake_' + (now + i),
+      name: 'Doc ' + i,
+      content: 'Contenu ' + i,
+      created_at: new Date().toISOString(),
+      likes: Math.floor(Math.random() * 5),
+      comments: [],
+      categoryId: randomCatId
+    })
+  }
+
+  await db.bulkDocs(docs)
+  await this.fetchData()
+  if (this.online) await this.manualSync()
+},
+
+    //recherche
+
+    async onSearchInput() {
+      if (!this.searchTerm) {
+        await this.fetchData()
+        return
+      }
+
+      this.error = ''
+      try {
+        const db = this.initLocalDb()
+        const r = await db.find({
+          selector: { name: { $eq: this.searchTerm } }
+        })
+        let docs = (r.docs as any[]).map((d) => this.normalizeDoc(d))
+
+        // appliquer aussi le filtre catégorie si défini
+        if (this.selectedCategory) {
+          docs = docs.filter((d) => d.categoryId === this.selectedCategory)
+        }
+
+        this.docs = docs
+      } catch (e: any) {
+        this.error = 'Erreur recherche : ' + e.message
       }
     },
 
@@ -178,99 +331,134 @@ export default defineComponent({
       this.fetchData()
     },
 
+    //commentaires
+
     getCommentDraft(id?: string) {
       if (!id) return ''
       return this.commentDrafts[id] || ''
     },
-    setCommentDraft(id: string, v: string) {
-      this.commentDrafts = { ...this.commentDrafts, [id]: v }
+
+    setCommentDraft(id: string, value: string) {
+      this.commentDrafts = { ...this.commentDrafts, [id]: value }
     },
 
     async addComment(doc: InfraDoc) {
       if (!doc._id) return
       const text = this.getCommentDraft(doc._id).trim()
       if (!text) return
+
+      this.error = ''
       try {
         const db = this.initLocalDb()
         const fresh = await db.get(doc._id)
         const base = this.normalizeDoc(fresh)
+
         const comment: InfraComment = {
           text,
           created_at: new Date().toISOString()
         }
+
         await db.put({
           ...base,
           comments: [...(base.comments || []), comment]
         })
+
         this.setCommentDraft(doc._id, '')
         await this.fetchData()
         if (this.online) await this.manualSync()
       } catch (e: any) {
-        this.error = 'Erreur addComment: ' + e.message
+        this.error = 'Erreur addComment : ' + e.message
       }
     },
 
-    async generateFake(n = 20) {
-      const db = this.initLocalDb()
-      const t = Date.now()
-      const docs: any[] = []
-      for (let i = 0; i < n; i++) {
-        docs.push({
-          _id: 'fake_' + (t + i),
-          name: 'Doc ' + i,
-          content: 'Contenu ' + i,
-          created_at: new Date().toISOString(),
-          likes: Math.floor(Math.random() * 5),
-          comments: []
-        })
+    //catégories
+
+    async fetchCategories() {
+      try {
+        const db = this.initLocalCatDb()
+        const r = await db.allDocs({ include_docs: true })
+
+        this.categories = (r.rows as Array<{ doc: any }>)
+          .map((row) => row.doc as Category)
+          .filter((d: Category | undefined | null): d is Category => !!d)
+          .sort(
+            (a: Category, b: Category) =>
+              new Date(b.created_at).getTime() -
+              new Date(a.created_at).getTime()
+          )
+      } catch (e: any) {
+        this.error = 'Erreur fetch catégories : ' + e.message
       }
-      await db.bulkDocs(docs)
+    },
+
+    async addCategory() {
+      if (!this.categoryName.trim()) return
+
+      const db = this.initLocalCatDb()
+      await db.post({
+        name: this.categoryName.trim(),
+        created_at: new Date().toISOString()
+      })
+
+      this.categoryName = ''
+      await this.fetchCategories()
+      if (this.online) await this.manualSync()
+    },
+
+    async deleteCategory(cat: Category) {
+      if (!cat._id || !cat._rev) return
+
+      const db = this.initLocalCatDb()
+      await db.remove(cat._id, cat._rev)
+
+      // (optionnel) nettoyer les documents associés à cette catégorie
+      const docDb = this.initLocalDb()
+      const docs = await docDb.allDocs({ include_docs: true })
+      for (const row of docs.rows as any[]) {
+        const d = row.doc
+        if (d && d.categoryId === cat._id) {
+          await docDb.put({
+            ...d,
+            categoryId: null
+          })
+        }
+      }
+
+      await this.fetchCategories()
       await this.fetchData()
       if (this.online) await this.manualSync()
     },
 
-    async onSearchInput() {
-      if (!this.searchTerm) {
-        await this.fetchData()
-        return
-      }
-      try {
-        const db = this.initLocalDb()
-        const r = await db.find({
-          selector: { name: { $eq: this.searchTerm } }
-        })
-        this.docs = (r.docs as any[]).map(this.normalizeDoc)
-      } catch (e: any) {
-        this.error = 'Erreur search: ' + e.message
-      }
-    },
+
 
     async replicateFromDistant() {
-      const local = this.initLocalDb()
-      const remote = this.initRemoteDb()
-      await local.replicate.from(remote)
-      await this.fetchData()
+      await this.initLocalDb().replicate.from(this.initRemoteDb())
+      await this.initLocalCatDb().replicate.from(this.initRemoteCatDb())
     },
+
     async replicateToDistant() {
-      const local = this.initLocalDb()
-      const remote = this.initRemoteDb()
-      await local.replicate.to(remote)
+      await this.initLocalDb().replicate.to(this.initRemoteDb())
+      await this.initLocalCatDb().replicate.to(this.initRemoteCatDb())
     },
+
     async manualSync() {
       await this.replicateFromDistant()
       await this.replicateToDistant()
     },
 
     startLiveSync() {
-      const local = this.initLocalDb()
-      const remote = this.initRemoteDb()
-      this.syncHandler = local
-        .sync(remote, { live: true, retry: true })
+      this.syncHandler = this.initLocalDb()
+        .sync(this.initRemoteDb(), { live: true, retry: true })
         .on('change', () => this.fetchData())
-        .on('error', console.error)
+
+      this.catSyncHandler = this.initLocalCatDb()
+        .sync(this.initRemoteCatDb(), { live: true, retry: true })
+        .on('change', () => this.fetchCategories())
     },
+
     stopLiveSync() {
       if (this.syncHandler?.cancel) this.syncHandler.cancel()
+      if (this.catSyncHandler?.cancel) this.catSyncHandler.cancel()
     },
 
     async toggleOnline() {
@@ -287,9 +475,16 @@ export default defineComponent({
   async mounted() {
     this.initLocalDb()
     this.initRemoteDb()
+    this.initLocalCatDb()
+    this.initRemoteCatDb()
+
     await this.ensureIndex()
+    await this.ensureCatIndex()
+
     await this.manualSync()
     await this.fetchData()
+    await this.fetchCategories()
+
     this.startLiveSync()
   }
 })
@@ -328,33 +523,41 @@ export default defineComponent({
         </div>
       </section>
 
+      //formulaire
       <section class="card">
         <h2>{{ isEdit ? 'Modifier' : 'Nouveau document' }}</h2>
+
         <label>Nom</label>
-        <input v-model="form.name" required />
+        <input v-model="form.name" />
+
+        <label>Catégorie</label>
+        <select v-model="selectedCategory">
+          <option value="">(Sans catégorie)</option>
+          <option
+            v-for="cat in categories"
+            :key="cat._id"
+            :value="cat._id || ''"
+          >
+            {{ cat.name }}
+          </option>
+        </select>
+
         <label>Contenu</label>
-        <textarea v-model="form.content" required></textarea>
+        <textarea v-model="form.content"></textarea>
+
         <div class="btn-row">
           <button class="btn primary" @click.prevent="submitForm">
             {{ isEdit ? 'Enregistrer' : 'Créer' }}
           </button>
-          <button
-            v-if="isEdit"
-            class="btn"
-            type="button"
-            @click="resetForm"
-          >
+          <button v-if="isEdit" class="btn" type="button" @click="resetForm">
             Annuler
           </button>
-          <button
-            class="btn"
-            type="button"
-            @click="generateFake(20)"
-          >
+          <button class="btn" type="button" @click="generateFake(20)">
             Générer 20 docs
           </button>
         </div>
       </section>
+
 
       <section class="card">
         <h2>Recherche</h2>
@@ -371,8 +574,9 @@ export default defineComponent({
         </div>
       </section>
 
+
       <section class="card">
-        <h2>Documents locaux</h2>
+        <h2>Documents</h2>
         <p v-if="docs.length === 0" class="empty">Aucun document.</p>
         <ul v-else class="list">
           <li v-for="doc in docs" :key="doc._id" class="item">
@@ -381,7 +585,9 @@ export default defineComponent({
                 <strong>{{ doc.name }}</strong>
                 <span class="likes">❤️ {{ doc.likes || 0 }}</span>
               </div>
+
               <p class="content">{{ doc.content }}</p>
+
               <p class="meta">
                 <span>ID: {{ doc._id }}</span>
                 <span>rev: {{ doc._rev }}</span>
@@ -389,17 +595,23 @@ export default defineComponent({
                 <span v-if="doc.updated_at">maj: {{ doc.updated_at }}</span>
               </p>
 
+              <p class="meta" v-if="doc.categoryId">
+                Catégorie ID : {{ doc.categoryId }}
+              </p>
+
               <div class="comments">
                 <p class="comments-title">Commentaires</p>
+
                 <p
-                  v-if="!doc.comments || doc.comments.length === 0"
+                  v-if="!(doc.comments || []).length"
                   class="comments-empty"
                 >
                   Aucun commentaire.
                 </p>
+
                 <ul v-else class="comments-list">
                   <li
-                    v-for="(c, i) in doc.comments"
+                    v-for="(c, i) in (doc.comments || [])"
                     :key="i"
                     class="comments-item"
                   >
@@ -407,6 +619,7 @@ export default defineComponent({
                     <span class="comment-date">({{ c.created_at }})</span>
                   </li>
                 </ul>
+
                 <div v-if="doc._id" class="comment-form">
                   <input
                     :value="getCommentDraft(doc._id)"
@@ -436,6 +649,37 @@ export default defineComponent({
               </button>
               <button class="btn small" @click="likeDoc(doc)">
                 Like
+              </button>
+            </div>
+          </li>
+        </ul>
+      </section>
+
+
+      <section class="card">
+        <h2>Catégories</h2>
+        <label>Nom</label>
+        <input v-model="categoryName" />
+        <div class="btn-row">
+          <button class="btn primary" @click="addCategory">
+            Ajouter catégorie
+          </button>
+        </div>
+        <p v-if="categories.length === 0" class="empty">
+          Aucune catégorie.
+        </p>
+        <ul v-else class="list">
+          <li v-for="cat in categories" :key="cat._id" class="item">
+            <div class="doc-main">
+              <strong>{{ cat.name }}</strong>
+              <p class="meta">
+                <span>ID: {{ cat._id }}</span>
+                <span>créé: {{ cat.created_at }}</span>
+              </p>
+            </div>
+            <div class="doc-actions">
+              <button class="btn small danger" @click="deleteCategory(cat)">
+                Supprimer
               </button>
             </div>
           </li>
@@ -521,7 +765,8 @@ h1 {
   font-size: 0.8rem;
 }
 input,
-textarea {
+textarea,
+select {
   width: 100%;
   border-radius: 7px;
   border: 1px solid #444;
