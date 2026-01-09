@@ -85,6 +85,19 @@ export default defineComponent({
   },
 
   methods: {
+    formatDate(dateStr?: string) {
+      if (!dateStr) return ''
+      return new Date(dateStr).toLocaleString('fr-FR', {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit'
+      })
+    },
+
+    getCategoryName(id?: string | null) {
+        if (!id) return ''
+        const cat = this.categories.find(c => c._id === id)
+        return cat ? cat.name : 'Catégorie inconnue'
+    },
 
     initLocalDb() {
       if (!this.localDb) {
@@ -331,7 +344,6 @@ export default defineComponent({
         const keys = Object.keys(doc._attachments)
         if (keys.length === 0) return null
 
-        // CORRECTION: On force le type string pour rassurer TS
         const fileName = keys[0] as string
         const attachment = (doc._attachments as any)[fileName]
 
@@ -668,16 +680,19 @@ export default defineComponent({
 
               <p class="content">{{ doc.content }}</p>
 
-              <p class="meta">
-                <span>ID: {{ doc._id }}</span>
-                <span>rev: {{ doc._rev }}</span>
-                <span>créé: {{ doc.created_at }}</span>
-                <span v-if="doc.updated_at">maj: {{ doc.updated_at }}</span>
-              </p>
+              <div class="meta-badges">
+                <span class="badge date">
+                  📅 {{ formatDate(doc.created_at) }}
+                </span>
 
-              <p class="meta" v-if="doc.categoryId">
-                Catégorie ID : {{ doc.categoryId }}
-              </p>
+                <span v-if="doc.categoryId" class="badge cat">
+                  🏷️ {{ getCategoryName(doc.categoryId) }}
+                </span>
+
+                <span v-if="doc.updated_at" class="badge date" title="Dernière maj">
+                  (Modifié: {{ formatDate(doc.updated_at) }})
+                </span>
+              </div>
 
               <div class="comments">
                 <p class="comments-title">
@@ -694,13 +709,13 @@ export default defineComponent({
                       <li v-if="!showAllComments[doc._id || '']" class="comments-item highlight">
                         <span class="label">Dernier :</span>
                         {{ doc.comments[doc.comments.length - 1]?.text }}
-                        <span class="comment-date">({{ doc.comments[doc.comments.length - 1]?.created_at }})</span>
+                        <span class="comment-date">({{ formatDate(doc.comments[doc.comments.length - 1]?.created_at) }})</span>
                       </li>
 
                       <template v-if="showAllComments[doc._id || '']">
                         <li v-for="(c, i) in doc.comments" :key="i" class="comments-item">
                             {{ c.text }}
-                            <span class="comment-date">({{ c.created_at }})</span>
+                            <span class="comment-date">({{ formatDate(c.created_at) }})</span>
                         </li>
                       </template>
                     </ul>
@@ -770,10 +785,9 @@ export default defineComponent({
           <li v-for="cat in categories" :key="cat._id" class="item">
             <div class="doc-main">
               <strong>{{ cat.name }}</strong>
-              <p class="meta">
-                <span>ID: {{ cat._id }}</span>
-                <span>créé: {{ cat.created_at }}</span>
-              </p>
+              <div class="meta-badges">
+                  <span class="badge date">📅 {{ formatDate(cat.created_at) }}</span>
+              </div>
             </div>
             <div class="doc-actions">
               <button class="btn small danger" @click="deleteCategory(cat)">
@@ -915,14 +929,6 @@ textarea {
   margin: 0.3rem 0;
   font-size: 0.9rem;
 }
-.meta {
-  margin: 0;
-  font-size: 0.75rem;
-  color: #a5a5a5;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
 .likes {
   font-size: 0.85rem;
 }
@@ -931,6 +937,30 @@ textarea {
   flex-direction: column;
   gap: 0.35rem;
 }
+
+/* Meta Clean Style */
+.meta-badges {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 0.8rem;
+  color: #888;
+  align-items: center;
+}
+.badge.cat {
+  background: #2a2a2a;
+  padding: 2px 8px;
+  border-radius: 10px;
+  color: #ccc;
+  border: 1px solid #444;
+}
+.badge.date {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+/* Comments */
 .comments {
   margin-top: 0.6rem;
   border-top: 1px solid #333;
