@@ -22,6 +22,12 @@ type InfraDoc = {
   likes?: number
   comments: InfraComment[]
   categoryId?: string | null
+  _attachments?: {
+    [filename: string]: {
+      content_type: string
+      data: string
+    }
+  }
 }
 
 type Category = {
@@ -31,13 +37,11 @@ type Category = {
   created_at: string
 }
 
-
-
 const DOCS_URL = 'http://admin:111911@127.0.0.1:5984/database'
 const CATS_URL = 'http://admin:111911@127.0.0.1:5984/categories_db'
 
 export default defineComponent({
-  name: 'TheWelcome',
+  name: 'InfraDonFinal',
 
   data() {
     return {
@@ -53,8 +57,16 @@ export default defineComponent({
       },
       isEdit: false,
       searchTerm: '',
-      sortByLikes: false,
+      sortByLikes: true,
       commentDrafts: {} as Record<string, string>,
+
+      // Pagination & Affichage
+      page: 0,
+      limit: 10,
+      showAllComments: {} as Record<string, boolean>,
+
+      // Assets
+      selectedFile: null as File | null,
 
       // catégories (2e collection)
       localCatDb: null as any,
@@ -73,7 +85,6 @@ export default defineComponent({
   },
 
   methods: {
-
 
     initLocalDb() {
       if (!this.localDb) {
@@ -103,8 +114,6 @@ export default defineComponent({
       return this.remoteCatDb
     },
 
-
-
     normalizeDoc(raw: any): InfraDoc {
       return {
         ...raw,
@@ -114,12 +123,11 @@ export default defineComponent({
       }
     },
 
-
-
     async ensureIndex() {
       const db = this.initLocalDb()
       await db.createIndex({ index: { fields: ['name'] } })
       await db.createIndex({ index: { fields: ['likes'] } })
+      await db.createIndex({ index: { fields: ['created_at'] } })
     },
 
     async ensureCatIndex() {
@@ -134,38 +142,68 @@ export default defineComponent({
       this.error = ''
       try {
         const db = this.initLocalDb()
-        let docs: InfraDoc[] = []
 
-        if (this.sortByLikes) {
-          const r = await db.find({
-            selector: { likes: { $gte: 0 } },
-            sort: [{ likes: 'desc' }]
-          })
-          docs = (r.docs as any[]).map((d) => this.normalizeDoc(d))
-        } else {
-          const r = await db.allDocs({ include_docs: true })
-          docs = (r.rows as Array<{ doc: any }>)
-            .map((row) => row.doc)
-            .filter((d): d is any => !!d)
-            .map((d) => this.normalizeDoc(d))
-            .sort(
-              (a: InfraDoc, b: InfraDoc) =>
-                new Date(b.created_at).getTime() -
-                new Date(a.created_at).getTime()
-            )
+        const selector: any = {}
+        const sort: any[] = []
+
+        if (this.searchTerm) {
+          selector.name = { $eq: this.searchTerm }
         }
 
-        // filtre par catégorie si une catégorie est sélectionnée
         if (this.selectedCategory) {
-          docs = docs.filter((d) => d.categoryId === this.selectedCategory)
+            selector.categoryId = { $eq: this.selectedCategory }
         }
 
-        this.docs = docs
+        // Stratégie de tri pour Mango Query
+        if (this.sortByLikes) {
+            selector.likes = { $gte: null }
+            sort.push({ likes: 'desc' })
+        } else {
+            selector.created_at = { $gte: null }
+            sort.push({ created_at: 'desc' })
+        }
+
+        const result = await db.find({
+            selector,
+            sort,
+            limit: this.limit,
+            skip: this.page * this.limit,
+            fields: ['_id', '_rev', 'name', 'content', 'likes', 'created_at', 'updated_at', 'comments', 'categoryId', '_attachments']
+        })
+
+        const detailedDocs = []
+        for (const d of result.docs) {
+            if (d._attachments) {
+                // Fetch complet pour avoir le blob data si le find ne l'a pas renvoyé
+                const full = await db.get(d._id, { attachments: true, binary: false })
+                detailedDocs.push(this.normalizeDoc(full))
+            } else {
+                detailedDocs.push(this.normalizeDoc(d))
+            }
+        }
+
+        this.docs = detailedDocs
+
       } catch (e: any) {
         this.error = 'Erreur fetch docs : ' + e.message
+        console.error(e)
       } finally {
         this.loading = false
       }
+    },
+
+    nextPage() {
+        if (this.docs.length === this.limit) {
+            this.page++
+            this.fetchData()
+        }
+    },
+
+    prevPage() {
+        if (this.page > 0) {
+            this.page--
+            this.fetchData()
+        }
     },
 
     resetForm() {
@@ -177,6 +215,16 @@ export default defineComponent({
         content: ''
       }
       this.selectedCategory = ''
+      this.selectedFile = null
+      const fileInput = document.getElementById('fileInput') as HTMLInputElement
+      if (fileInput) fileInput.value = ''
+    },
+
+    onFileChange(e: Event) {
+        const target = e.target as HTMLInputElement
+        if (target.files && target.files.length > 0) {
+            (this as any).selectedFile = target.files[0]
+        }
     },
 
     async submitForm() {
@@ -186,6 +234,7 @@ export default defineComponent({
       this.error = ''
       try {
         const db = this.initLocalDb()
+        let response
 
         if (this.isEdit && this.form._id) {
           const fresh = await db.get(this.form._id)
@@ -200,8 +249,7 @@ export default defineComponent({
             updated_at: new Date().toISOString(),
             categoryId: this.selectedCategory || null
           }
-
-          await db.put(updated)
+          response = await db.put(updated)
         } else {
           const doc: InfraDoc = {
             name: this.form.name,
@@ -211,7 +259,17 @@ export default defineComponent({
             comments: [],
             categoryId: this.selectedCategory || null
           }
-          await db.post(doc)
+          response = await db.post(doc)
+        }
+
+        if (this.selectedFile) {
+            await db.putAttachment(
+                response.id,
+                this.selectedFile.name,
+                response.rev,
+                this.selectedFile,
+                this.selectedFile.type
+            )
         }
 
         this.resetForm()
@@ -233,6 +291,7 @@ export default defineComponent({
         content: doc.content
       }
       this.selectedCategory = doc.categoryId || ''
+      this.selectedFile = null
     },
 
     async deleteData(id: string, rev: string) {
@@ -250,6 +309,34 @@ export default defineComponent({
       } finally {
         this.loading = false
       }
+    },
+
+    async deleteAttachment(doc: InfraDoc) {
+        if (!doc._id || !doc._attachments) return
+        const fileName = Object.keys(doc._attachments)[0]
+        if (!fileName) return
+
+        try {
+            const db = this.initLocalDb()
+            await db.removeAttachment(doc._id, fileName, doc._rev!)
+            await this.fetchData()
+            if (this.online) await this.manualSync()
+        } catch (e: any) {
+            this.error = 'Erreur suppression image : ' + e.message
+        }
+    },
+
+    getAttachmentSrc(doc: InfraDoc) {
+        if (!doc._attachments) return null
+        const keys = Object.keys(doc._attachments)
+        if (keys.length === 0) return null
+
+        // CORRECTION: On force le type string pour rassurer TS
+        const fileName = keys[0] as string
+        const attachment = (doc._attachments as any)[fileName]
+
+        if (!attachment) return null
+        return `data:${attachment.content_type};base64,${attachment.data}`
     },
 
     async likeDoc(doc: InfraDoc) {
@@ -270,64 +357,48 @@ export default defineComponent({
     },
 
     async generateFake(n = 20) {
-  const db = this.initLocalDb()
-  const now = Date.now()
-  const docs: any[] = []
+      const db = this.initLocalDb()
+      const now = Date.now()
+      const docs: any[] = []
 
-  for (let i = 0; i < n; i++) {
-    let randomCatId: string | null = null
+      for (let i = 0; i < n; i++) {
+        let randomCatId: string | null = null
 
-    if (this.categories.length > 0) {
-      const index = Math.floor(Math.random() * this.categories.length)
-      const randomCat: Category | undefined = this.categories[index]
-      randomCatId = randomCat?._id ?? null
-    }
+        if (this.categories.length > 0) {
+          const index = Math.floor(Math.random() * this.categories.length)
+          const randomCat: Category | undefined = this.categories[index]
+          randomCatId = randomCat?._id ?? null
+        }
 
-    docs.push({
-      _id: 'fake_' + (now + i),
-      name: 'Doc ' + i,
-      content: 'Contenu ' + i,
-      created_at: new Date().toISOString(),
-      likes: Math.floor(Math.random() * 5),
-      comments: [],
-      categoryId: randomCatId
-    })
-  }
+        docs.push({
+          _id: 'fake_' + (now + i),
+          name: 'Doc ' + i,
+          content: 'Contenu ' + i,
+          created_at: new Date().toISOString(),
+          likes: Math.floor(Math.random() * 50),
+          comments: [
+            { text: 'Premier commentaire', created_at: new Date().toISOString() },
+            { text: 'Deuxième commentaire', created_at: new Date().toISOString() }
+          ],
+          categoryId: randomCatId
+        })
+      }
 
-  await db.bulkDocs(docs)
-  await this.fetchData()
-  if (this.online) await this.manualSync()
-},
+      await db.bulkDocs(docs)
+      await this.fetchData()
+      if (this.online) await this.manualSync()
+    },
 
     //recherche
 
     async onSearchInput() {
-      if (!this.searchTerm) {
-        await this.fetchData()
-        return
-      }
-
-      this.error = ''
-      try {
-        const db = this.initLocalDb()
-        const r = await db.find({
-          selector: { name: { $eq: this.searchTerm } }
-        })
-        let docs = (r.docs as any[]).map((d) => this.normalizeDoc(d))
-
-        // appliquer aussi le filtre catégorie si défini
-        if (this.selectedCategory) {
-          docs = docs.filter((d) => d.categoryId === this.selectedCategory)
-        }
-
-        this.docs = docs
-      } catch (e: any) {
-        this.error = 'Erreur recherche : ' + e.message
-      }
+      this.page = 0
+      await this.fetchData()
     },
 
     toggleSortLikes() {
       this.sortByLikes = !this.sortByLikes
+      this.page = 0
       this.fetchData()
     },
 
@@ -340,6 +411,10 @@ export default defineComponent({
 
     setCommentDraft(id: string, value: string) {
       this.commentDrafts = { ...this.commentDrafts, [id]: value }
+    },
+
+    toggleComments(id: string) {
+        this.showAllComments[id] = !this.showAllComments[id]
     },
 
     async addComment(doc: InfraDoc) {
@@ -428,8 +503,6 @@ export default defineComponent({
       await this.fetchData()
       if (this.online) await this.manualSync()
     },
-
-
 
     async replicateFromDistant() {
       await this.initLocalDb().replicate.from(this.initRemoteDb())
@@ -523,7 +596,6 @@ export default defineComponent({
         </div>
       </section>
 
-      //formulaire
       <section class="card">
         <h2>{{ isEdit ? 'Modifier' : 'Nouveau document' }}</h2>
 
@@ -545,6 +617,9 @@ export default defineComponent({
         <label>Contenu</label>
         <textarea v-model="form.content"></textarea>
 
+        <label>Image</label>
+        <input type="file" id="fileInput" @change="onFileChange" accept="image/*" />
+
         <div class="btn-row">
           <button class="btn primary" @click.prevent="submitForm">
             {{ isEdit ? 'Enregistrer' : 'Créer' }}
@@ -558,7 +633,6 @@ export default defineComponent({
         </div>
       </section>
 
-
       <section class="card">
         <h2>Recherche</h2>
         <input
@@ -567,16 +641,15 @@ export default defineComponent({
           placeholder="Nom exact..."
         />
         <div class="btn-row small">
-          <span>Tri: {{ sortByLikes ? 'likes' : 'date' }}</span>
+          <span>Tri: {{ sortByLikes ? 'Likes (Top 10)' : 'Date' }}</span>
           <button class="btn small" @click="toggleSortLikes">
             Changer tri
           </button>
         </div>
       </section>
 
-
       <section class="card">
-        <h2>Documents</h2>
+        <h2>Documents ({{ docs.length }} affichés)</h2>
         <p v-if="docs.length === 0" class="empty">Aucun document.</p>
         <ul v-else class="list">
           <li v-for="doc in docs" :key="doc._id" class="item">
@@ -584,6 +657,13 @@ export default defineComponent({
               <div class="top">
                 <strong>{{ doc.name }}</strong>
                 <span class="likes">❤️ {{ doc.likes || 0 }}</span>
+              </div>
+
+              <div v-if="getAttachmentSrc(doc)" class="attachment-preview">
+                <img :src="getAttachmentSrc(doc) || ''" alt="Media" />
+                <button class="btn small danger remove-btn" @click="deleteAttachment(doc)">
+                    &times;
+                </button>
               </div>
 
               <p class="content">{{ doc.content }}</p>
@@ -600,25 +680,38 @@ export default defineComponent({
               </p>
 
               <div class="comments">
-                <p class="comments-title">Commentaires</p>
+                <p class="comments-title">
+                    Commentaires
+                    <span v-if="doc.comments.length > 0">({{ doc.comments.length }})</span>
+                </p>
 
-                <p
-                  v-if="!(doc.comments || []).length"
-                  class="comments-empty"
-                >
+                <p v-if="!(doc.comments || []).length" class="comments-empty">
                   Aucun commentaire.
                 </p>
 
-                <ul v-else class="comments-list">
-                  <li
-                    v-for="(c, i) in (doc.comments || [])"
-                    :key="i"
-                    class="comments-item"
-                  >
-                    {{ c.text }}
-                    <span class="comment-date">({{ c.created_at }})</span>
-                  </li>
-                </ul>
+                <div v-else>
+                    <ul class="comments-list">
+                      <li v-if="!showAllComments[doc._id || '']" class="comments-item highlight">
+                        <span class="label">Dernier :</span>
+                        {{ doc.comments[doc.comments.length - 1]?.text }}
+                        <span class="comment-date">({{ doc.comments[doc.comments.length - 1]?.created_at }})</span>
+                      </li>
+
+                      <template v-if="showAllComments[doc._id || '']">
+                        <li v-for="(c, i) in doc.comments" :key="i" class="comments-item">
+                            {{ c.text }}
+                            <span class="comment-date">({{ c.created_at }})</span>
+                        </li>
+                      </template>
+                    </ul>
+
+                    <button
+                        v-if="doc.comments.length > 1"
+                        class="btn link"
+                        @click="toggleComments(doc._id || '')">
+                        {{ showAllComments[doc._id || ''] ? 'Voir moins' : 'Voir tous les commentaires' }}
+                    </button>
+                </div>
 
                 <div v-if="doc._id" class="comment-form">
                   <input
@@ -653,11 +746,16 @@ export default defineComponent({
             </div>
           </li>
         </ul>
+
+        <div class="pagination">
+            <button class="btn" :disabled="page === 0" @click="prevPage">Précédent</button>
+            <span>Page {{ page + 1 }}</span>
+            <button class="btn" :disabled="docs.length < limit" @click="nextPage">Suivant</button>
+        </div>
       </section>
 
-
       <section class="card">
-        <h2>Catégories</h2>
+        <h2>Catégories (deuxième)</h2>
         <label>Nom</label>
         <input v-model="categoryName" />
         <div class="btn-row">
@@ -764,6 +862,13 @@ h1 {
   padding: 0.3rem 0.7rem;
   font-size: 0.8rem;
 }
+.btn.link {
+    background: none;
+    text-decoration: underline;
+    color: #3f8cff;
+    padding: 0;
+    margin-top: 5px;
+}
 input,
 textarea,
 select {
@@ -847,16 +952,32 @@ textarea {
   font-size: 0.8rem;
 }
 .comments-item {
-  margin-bottom: 0.1rem;
+  margin-bottom: 0.3rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid #222;
+}
+.comments-item.highlight {
+    color: #ddd;
+    font-style: italic;
+    border-left: 2px solid #3f8cff;
+    padding-left: 0.5rem;
+}
+.label {
+    font-weight: bold;
+    font-size: 0.75rem;
+    color: #3f8cff;
+    margin-right: 0.3rem;
 }
 .comment-date {
   color: #9a9a9a;
   margin-left: 0.2rem;
+  font-size: 0.7rem;
 }
 .comment-form {
   display: flex;
   gap: 0.4rem;
   align-items: center;
+  margin-top: 0.5rem;
 }
 .comment-form input {
   margin: 0;
@@ -864,6 +985,34 @@ textarea {
 .empty {
   font-size: 0.9rem;
   color: #cfcfcf;
+}
+.attachment-preview {
+    margin: 10px 0;
+    position: relative;
+    display: inline-block;
+}
+.attachment-preview img {
+    max-width: 100%;
+    max-height: 200px;
+    border-radius: 5px;
+    border: 1px solid #444;
+}
+.remove-btn {
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    line-height: 1;
+    border-radius: 50%;
+}
+.pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 1rem;
 }
 @media (max-width: 720px) {
   .bar {
