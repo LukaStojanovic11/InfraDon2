@@ -100,6 +100,8 @@ export default defineComponent({
     },
 
     initLocalDb() {
+      // Choix PouchDB : On passe par une base locale 'infra_local'
+      // pour garantir que l'app fonctionne même sans connexion (Offline First).
       if (!this.localDb) {
         this.localDb = new PouchDB('infra_local')
       }
@@ -138,6 +140,8 @@ export default defineComponent({
 
     async ensureIndex() {
       const db = this.initLocalDb()
+      // Création des index pour permettre les tris et filtres via Mango Query
+      // Indispensable pour éviter de tout charger en RAM pour trier.
       await db.createIndex({ index: { fields: ['name'] } })
       await db.createIndex({ index: { fields: ['likes'] } })
       await db.createIndex({ index: { fields: ['created_at'] } })
@@ -167,7 +171,10 @@ export default defineComponent({
             selector.categoryId = { $eq: this.selectedCategory }
         }
 
-        // Stratégie de tri pour Mango Query
+        //  JUSTIFICATION TRI & PERF
+        // J'utilise db.find (Mango) au lieu de tout charger avec allDocs.
+        // Ça permet de déléguer le tri à la base de données (via les index)
+        // et de ne pas surcharger le navigateur si on a 1000 docs.
         if (this.sortByLikes) {
             selector.likes = { $gte: null }
             sort.push({ likes: 'desc' })
@@ -176,6 +183,7 @@ export default defineComponent({
             sort.push({ created_at: 'desc' })
         }
 
+        // Utilisation de limit/skip pour la pagination serveur
         const result = await db.find({
             selector,
             sort,
@@ -187,7 +195,8 @@ export default defineComponent({
         const detailedDocs = []
         for (const d of result.docs) {
             if (d._attachments) {
-                // Fetch complet pour avoir le blob data si le find ne l'a pas renvoyé
+                // Si y'a une image, on doit fetch le doc complet pour avoir les data binaires (blob)
+                // car db.find ne renvoie pas toujours le contenu des attachments par défaut.
                 const full = await db.get(d._id, { attachments: true, binary: false })
                 detailedDocs.push(this.normalizeDoc(full))
             } else {
@@ -276,6 +285,7 @@ export default defineComponent({
         }
 
         if (this.selectedFile) {
+            // Gestion des assets : on attache le fichier directement au doc PouchDB
             await db.putAttachment(
                 response.id,
                 this.selectedFile.name,
@@ -532,6 +542,8 @@ export default defineComponent({
     },
 
     startLiveSync() {
+      // Configuration de la synchronisation LIVE
+      // Permet de mettre à jour l'interface dès qu'un changement distant arrive.
       this.syncHandler = this.initLocalDb()
         .sync(this.initRemoteDb(), { live: true, retry: true })
         .on('change', () => this.fetchData())
@@ -883,9 +895,7 @@ h1 {
     padding: 0;
     margin-top: 5px;
 }
-input,
-textarea,
-select {
+input, textarea, select {
   width: 100%;
   border-radius: 7px;
   border: 1px solid #444;
